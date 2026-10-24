@@ -53,7 +53,14 @@ private val RESOLUTIONS = listOf(
     Res("720×1280", 720, 1280, 320),
 )
 
-private val RAM_STEPS = listOf(0, 256, 512, 768, 1024, 1536, 2048, 3072, 4096)
+// Modern firmware is happiest with more than 4 GB (Android 13+ phones ship 6-8 GB); the
+// old ceiling of 4096 left most of a 12 GB phone unused. Anything above is still capped by
+// half of the phone's RAM in GuestRunner.guestRamMb().
+private val RAM_STEPS = listOf(0, 256, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288)
+
+/** Index of the closest step: a value written by an older build is still shown, not silently reset to "Automatic". */
+private fun ramIndex(mb: Int): Int =
+    if (mb <= 0) 0 else RAM_STEPS.indices.minByOrNull { kotlin.math.abs(RAM_STEPS[it] - mb) } ?: 0
 
 @Composable
 fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings) -> Unit) {
@@ -107,7 +114,7 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings) -
                 if (has32) stringResource(R.string.vs_native32_sub) else stringResource(R.string.vs_native32_unsupported),
                 s.native32 && has32
             ) { if (has32) s = s.copy(native32 = it) }
-            val ramIdx = RAM_STEPS.indexOf(s.ramMb).coerceAtLeast(0)
+            val ramIdx = ramIndex(s.ramMb)
             ListItem(
                 headlineContent = { Text(stringResource(R.string.vs_ram)) },
                 supportingContent = {

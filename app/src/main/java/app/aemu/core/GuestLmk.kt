@@ -22,6 +22,8 @@ import java.util.concurrent.ConcurrentHashMap
 /** [ramMb] > 0: guest RAM budget; background apps are killed when the guest's total RSS exceeds it. */
 class GuestLmk(private val root: File, private val lowRam: Boolean, private val log: (String) -> Unit, private val ramMb: Int = 0) {
     private val adj = ConcurrentHashMap<Int, Int>()
+    /** pids this keeper has SIGKILLed, so a death can be reported as ours instead of "the phone ran out of memory" */
+    private val killedByUs = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Int, Boolean>())
     @Volatile private var running = false
     private var server: LocalServerSocket? = null
     private var bound: LocalSocket? = null
@@ -40,6 +42,9 @@ class GuestLmk(private val root: File, private val lowRam: Boolean, private val 
         runCatching { serveLmkd() }.onFailure { log("lmk: lmkd socket failed: $it") }
         Thread({ loop() }, "lmk").apply { isDaemon = true; start() }
     }
+
+    /** true when this keeper killed [pid]: the death is our budget doing its job, not the phone running out */
+    fun wasKilled(pid: Int): Boolean = pid > 0 && killedByUs.contains(pid)
 
     fun stop() {
         running = false
@@ -158,6 +163,8 @@ class GuestLmk(private val root: File, private val lowRam: Boolean, private val 
             val a = adj[victim]
             runCatching { Os.kill(victim, OsConstants.SIGKILL) }
             adj.remove(victim)
+            killedByUs.add(victim)
+            if (killedByUs.size > 512) killedByUs.clear()     // only the recent ones are ever asked about
             kills++
             log("memory: killed background process $victim (adj $a, ${sizes[victim]} MB; cached ${cached.size}, host free $avail MB)")
             Thread.sleep(3000)

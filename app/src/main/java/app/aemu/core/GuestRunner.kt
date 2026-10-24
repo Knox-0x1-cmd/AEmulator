@@ -210,14 +210,34 @@ class GuestRunner(
     companion object {
         private val EXPORTS_SKIP = setOf("PATH", "LD_LIBRARY_PATH", "BOOTCLASSPATH", "LD_PRELOAD")
 
-        /** RAM the guest is told it has: the user's choice, or what phones of that Android version shipped with. */
+        /**
+         * Guest RAM budget in MB: what the image is told its phone has (/proc/meminfo, the Dalvik heap,
+         * the activity manager's background limits).
+         *
+         * Auto used to stop at 4096, so an Android 13+ image on a 12 GB phone sized itself for a mid-range
+         * device and could not use the RAM that was there. It now follows the phone up to 8 GB, but never
+         * more than half of it: the guest's processes are real processes of this app, and the phone's own
+         * low-memory killer must still have room to work.
+         */
         fun guestRamMb(api: Int, chosen: Int): Int {
-            if (chosen > 0) return chosen
-            val typical = when { api <= 10 -> 512; api <= 15 -> 1024; api <= 19 -> 2048; api <= 23 -> 3072; else -> 4096 }
+            if (chosen > 0) return chosen.coerceAtMost(MAX_GUEST_MB)
+            val typical = when {
+                api <= 10 -> 512
+                api <= 15 -> 1024
+                api <= 19 -> 2048
+                api <= 23 -> 3072
+                api <= 25 -> 4096
+                else -> 6144
+            }
             val hostMb = runCatching {
                 java.io.File("/proc/meminfo").useLines { l -> l.first { it.startsWith("MemTotal:") } }.split(Regex("\\s+"))[1].toLong() / 1024
             }.getOrDefault(8192L)
-            return typical.coerceAtMost((hostMb / 2).toInt())
+            return typical.coerceAtMost((hostMb / 2).toInt()).coerceAtMost(MAX_GUEST_MB).coerceAtLeast(MIN_GUEST_MB)
         }
+
+        /** More than this is never handed to one image, whatever the phone has. */
+        const val MAX_GUEST_MB = 8192
+        private const val MIN_GUEST_MB = 256
+
     }
 }

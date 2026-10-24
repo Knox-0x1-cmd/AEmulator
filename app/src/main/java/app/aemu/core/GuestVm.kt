@@ -493,7 +493,10 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             val f = File(paths.root, "dev/.aemu-ram")
             if (kernel.ramBudget) f.writeText((GuestRunner.guestRamMb(img.api, s.ramMb) * 1024L).toString()) else f.delete()
         }
-        lmk = GuestLmk(paths.root, s.lowRam, ::log, s.ramMb).also { it.start() }
+        // The keeper used to get s.ramMb, which is 0 in "Automatic": the budget was then never enforced and
+        // background services grew until the phone killed something. It gets the budget the image was told.
+        val ramBudget = GuestRunner.guestRamMb(img.api, s.ramMb)
+        lmk = GuestLmk(paths.root, s.lowRam, ::log, ramBudget).also { it.start() }
         val netCfg = if (s.netProxy) net.start() else GuestRunner.NetConfig()
         runner.sdcardHost = sd
         val r = GuestRunner(paths, img, netCfg.copy(glPath = if (s.gpu) "/dev/socket/gl" else null)).also {
@@ -1039,6 +1042,31 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     /** qemu maps a guest path into the tree only if the file exists there, so the shim's request file is pre-made */
     private val power: File get() = File(paths.root, "dev/aemu_power")
 
+    /**
+     * "code 137" is SIGKILL, and the app used to blame the phone's memory for every one of them. That is
+     * usually wrong twice over: the keeper's own kills are known by pid, and Android 12+ kills an app's child
+     * processes once more than 32 of them run (the phantom-process killer) — with gigabytes still free. A
+     * booted guest runs dozens, so that, not RAM, is the usual reason a zygote dies on a big phone.
+     */
+    private fun deathReason(p: Process?, code: Int): String {
+        if (code != 137) return ""
+        val pid = (p?.let { runCatching { it.pid() }.getOrNull() } ?: -1L).toInt()
+        val budget = GuestRunner.guestRamMb(img.api, settings.ramMb)
+        if (lmk?.wasKilled(pid) == true)
+            return " — killed by the emulator's memory keeper (guest RAM budget $budget MB): raise Guest RAM or turn off Low memory mode"
+        val avail = runCatching {
+            File("/proc/meminfo").useLines { l -> l.first { it.startsWith("MemAvailable:") } }.split(Regex("\\s+"))[1].toLong() / 1024
+        }.getOrNull()
+        if (avail != null && avail > budget) {
+            log("hint: Android 12+ limits an app to 32 child processes and SIGKILLs the rest (\"phantom processes\"),")
+            log("      however much RAM is free. Disable it once over ADB, no root needed:")
+            log("      adb shell settings put global settings_enable_monitor_phantom_procs false")
+            log("      adb shell device_config put activity_manager max_phantom_processes 2147483647")
+            return " — SIGKILL while $avail MB was free: not memory, the system's phantom-process limit (fix in the log)"
+        }
+        return " — SIGKILL (${avail?.let { "$it MB free" } ?: "memory state unknown"}, guest budget $budget MB)"
+    }
+
     private fun watchdog() {
         runCatching { power.writeText(""); power.setWritable(true, false) }
         Thread({
@@ -1054,7 +1082,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
                     val code = runCatching { p.exitValue() }.getOrDefault(-1)
                     if (name == "zygote" || name == "zygote_secondary") {
                         if (state != State.FAILED && bootDoneAt == 0L && !(everBooted && zygoteRestarts < 6)) {
-                            failure = "$name exited (code $code)" + if (code == 137) " — killed: the phone ran out of memory, or system_server died and took zygote with it (see the guest log)" else ""
+                            failure = "$name exited (code $code)" + deathReason(p, code)
                             if (code == 137 && guestLogHas("No original dex files found"))
                                 failure = "system_server cannot start: the precompiled code of the framework (system/framework/oat) is missing from this container — import the firmware again"
                             log("✖ $failure"); setState(State.FAILED)

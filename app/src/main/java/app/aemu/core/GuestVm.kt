@@ -1048,9 +1048,17 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
      * processes once more than 32 of them run (the phantom-process killer) — with gigabytes still free. A
      * booted guest runs dozens, so that, not RAM, is the usual reason a zygote dies on a big phone.
      */
+    /**
+     * Process.pid() exists since API 26, but the Kotlin compiler does not see it in android.jar, so it is
+     * called reflectively. Anything unexpected means "pid unknown" and the death is reported without blaming us.
+     */
+    private fun pidOf(p: Process?): Int = p?.let { proc ->
+        runCatching { (java.lang.Process::class.java.getMethod("pid").invoke(proc) as Long).toInt() }.getOrNull()
+    } ?: -1
+
     private fun deathReason(p: Process?, code: Int): String {
         if (code != 137) return ""
-        val pid = (p?.let { runCatching { it.pid() }.getOrNull() } ?: -1L).toInt()
+        val pid = pidOf(p)
         val budget = GuestRunner.guestRamMb(img.api, settings.ramMb)
         if (lmk?.wasKilled(pid) == true)
             return " — killed by the emulator's memory keeper (guest RAM budget $budget MB): raise Guest RAM or turn off Low memory mode"

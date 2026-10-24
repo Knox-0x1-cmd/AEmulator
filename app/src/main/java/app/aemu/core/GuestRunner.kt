@@ -215,23 +215,23 @@ class GuestRunner(
          * the activity manager's background limits).
          *
          * Auto used to stop at 4096, so an Android 13+ image on a 12 GB phone sized itself for a mid-range
-         * device and could not use the RAM that was there. It now follows the phone up to 8 GB, but never
-         * more than half of it: the guest's processes are real processes of this app, and the phone's own
-         * low-memory killer must still have room to work.
+         * device and could not use the RAM that was there. It follows the phone up to 8 GB, but never more
+         * than half of it. On an 8 GB phone the guest gets 2 GB, not 3.7: a stock One UI phone keeps 4-5 GB
+         * for itself, and Android 15 boots and runs in 2. The guest processes are real processes of this
+         * app; sizing the guest by total RAM alone made it eat the phone's last free gigabyte.
          */
         fun guestRamMb(api: Int, chosen: Int): Int {
             if (chosen > 0) return chosen.coerceAtMost(MAX_GUEST_MB)
+            val hostMb = HostInfo.ramMb
             val typical = when {
                 api <= 10 -> 512
                 api <= 15 -> 1024
                 api <= 19 -> 2048
                 api <= 23 -> 3072
                 api <= 25 -> 4096
+                hostMb <= 8192 -> 2048
                 else -> 6144
             }
-            val hostMb = runCatching {
-                java.io.File("/proc/meminfo").useLines { l -> l.first { it.startsWith("MemTotal:") } }.split(Regex("\\s+"))[1].toLong() / 1024
-            }.getOrDefault(8192L)
             return typical.coerceAtMost((hostMb / 2).toInt()).coerceAtMost(MAX_GUEST_MB).coerceAtLeast(MIN_GUEST_MB)
         }
 

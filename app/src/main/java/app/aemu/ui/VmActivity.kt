@@ -978,8 +978,8 @@ class VmActivity : ComponentActivity() {
         val guestLines = remember { mutableStateListOf<String>() }
         LaunchedEffect(guestTab) {
             while (guestTab) {
-                val recs = GuestLog.tail(vm.paths.root, 128 * 1024).takeLast(300)
-                guestLines.clear(); guestLines.addAll(recs.map { "${it.prio} ${it.tag}: ${it.msg}" })
+                val recs = GuestLog.tailAll(vm.paths.root, 128 * 1024).takeLast(300)
+                guestLines.clear(); guestLines.addAll(recs.map { "${it.prio} ${if (it.buf == "main") "" else "[${it.buf}] "}${it.tag}: ${it.msg}" })
                 delay(1500)
             }
         }
@@ -990,7 +990,16 @@ class VmActivity : ComponentActivity() {
                     Text(stringResource(R.string.log), style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f),
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                     IconButton(onClick = { copyLog(list.toList()) }) { Icon(Icons.Rounded.ContentCopy, stringResource(R.string.log_copy)) }
-                    IconButton(onClick = { pendingExport = list.toList(); exportLog.launch("aemu-${vm.img.id}-${if (guestTab) "logcat" else "host"}.log") }) {
+                    IconButton(onClick = {
+                        val name = "aemu-${vm.img.id}-${if (guestTab) "logcat" else "host"}.log"
+                        if (guestTab) thread {
+                            val lines = GuestLog.tailAll(vm.paths.root, 512 * 1024).map { "${it.prio} [${it.buf}] ${it.tag}: ${it.msg}" }
+                            runOnUiThread { pendingExport = lines; exportLog.launch(name) }
+                        } else {
+                            pendingExport = list.toList()
+                            exportLog.launch(name)
+                        }
+                    }) {
                         Icon(Icons.Rounded.Download, stringResource(R.string.log_export))
                     }
                     FilledTonalIconButton(onClick = onClose) { Icon(Icons.Rounded.Close, stringResource(R.string.close)) }

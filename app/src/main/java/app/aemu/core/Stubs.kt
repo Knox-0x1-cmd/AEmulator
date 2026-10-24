@@ -588,14 +588,29 @@ class LogdSink(paths: VmPaths, private val log: (String) -> Unit) {
                     if (n < 0) break
                     if (n <= 12) continue
                     val id = buf[0].toInt() and 0xff
-                    val name = when (id) { 0 -> "main"; 1 -> "radio"; 3 -> "system"; 4 -> "main"; else -> continue }
+                    val name = when (id) { 0 -> "main"; 1 -> "radio"; 3 -> "system"; 4 -> "crash"; else -> continue }
                     val o = outs.getOrPut(id) { java.io.FileOutputStream(File(dir, name), true) }
-                    runCatching { o.write(buf, 11, n - 11); if (buf[n - 1].toInt() != 0) o.write(0) }
+                    runCatching {
+                        // 0x1e + epoch nanoseconds: GuestLog merges main/system/crash by time. Older
+                        // files (crash.c, pre-5.0 guests) have no marker and are still parsed.
+                        val ns = le32(buf, 3) * 1_000_000_000L + le32(buf, 7)
+                        val rec = ByteArray(9 + (n - 11) + 1)
+                        rec[0] = 0x1e.toByte()
+                        for (k in 0 until 8) rec[1 + k] = ((ns ushr (8 * k)) and 0xff).toByte()
+                        System.arraycopy(buf, 11, rec, 9, n - 11)
+                        var len = 9 + n - 11
+                        if (buf[n - 1].toInt() != 0) rec[len++] = 0
+                        o.write(rec, 0, len)
+                    }
                 }
                 outs.values.forEach { runCatching { it.close() } }
             }, "aemu-logd").apply { isDaemon = true; start() }
         }.onFailure { log("logd: socket failed: ${it.message}") }
     }
+
+    private fun le32(b: ByteArray, o: Int): Long =
+        (b[o].toLong() and 0xff) or ((b[o + 1].toLong() and 0xff) shl 8) or
+            ((b[o + 2].toLong() and 0xff) shl 16) or ((b[o + 3].toLong() and 0xff) shl 24)
 
     fun stop() { runCatching { s?.close() }; s = null; sock.delete() }
 }

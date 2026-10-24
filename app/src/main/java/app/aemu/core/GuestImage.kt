@@ -41,6 +41,12 @@ data class VmSettings(
     val radio: Boolean = true,
     /** hardware 32-bit (AArch32 EL0) bypass without translator on supported CPUs */
     val native32: Boolean = false,
+    /**
+     * Start the firmware's second (32-bit) zygote too, for 32-bit-only apps. Off by default on 8 GB
+     * phones: it is a whole extra ART runtime, and on arm64 it runs translated by qemu-arm, so it
+     * costs both RAM and minutes of boot time while boot itself never needs it.
+     */
+    val abi32: Boolean = HostInfo.ramMb > 8192,
     /** IMEI reported by the fake modem; blank = default sample IMEI */
     val imei: String = "",
     /** extra qemu options; KEY=VALUE tokens are passed as environment variables */
@@ -52,7 +58,7 @@ data class VmSettings(
         .put("touchHz", touchHz).put("netProxy", netProxy).put("lowRam", lowRam)
         .put("showFrame", showFrame).put("showNavBar", showNavBar).put("navKeys", navKeys).put("navSize", navSize)
         .put("keepScreenOn", keepScreenOn).put("showLed", showLed).put("mtMode", mtMode).put("legacyEngine", legacyEngine)
-        .put("ramMb", ramMb).put("radio", radio).put("native32", native32).put("imei", imei).put("qemuArgs", qemuArgs)
+        .put("ramMb", ramMb).put("radio", radio).put("native32", native32).put("abi32", abi32).put("imei", imei).put("qemuArgs", qemuArgs)
 
     companion object {
         const val NAV_DEFAULT = "back,home,recents,menu"
@@ -95,6 +101,7 @@ data class VmSettings(
                 ramMb = o.optInt("ramMb", 0),
                 radio = o.optBoolean("radio", true),
                 native32 = o.optBoolean("native32", false),
+                abi32 = o.optBoolean("abi32", d.abi32),
                 imei = o.optString("imei", ""),
                 qemuArgs = o.optString("qemuArgs", ""),
             )

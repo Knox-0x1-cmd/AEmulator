@@ -8,7 +8,7 @@ GitHub release when a version tag is pushed.
 | Trigger | Result |
 |---|---|
 | push to `main`, pull request | APK artifact `aemulator-apks` (30 days) |
-| tag `0.0.0.4` or `v0.0.0.4` | release with both APKs + `SHA256SUMS.txt` |
+| tag `0.0.0.5` or `v0.0.0.5` | release with both APKs + `SHA256SUMS.txt` |
 | *Run workflow* with **release** on | release, tag from the input or `build-<date>` |
 
 The job installs JDK 17, Android SDK platform 36 and build-tools 36.0.0, then runs:
@@ -58,7 +58,7 @@ secrets in the runner's workspace only.
 
 ```bash
 # bump versionCode / versionName in app/build.gradle.kts, commit, then
-git tag 0.0.0.4
+git tag 0.0.0.5
 git push origin main --tags
 ```
 

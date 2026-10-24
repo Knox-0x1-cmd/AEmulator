@@ -42,6 +42,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import app.aemu.core.CpuInfo
 import app.aemu.core.Engine
+import app.aemu.core.GuestRunner
 import app.aemu.core.GuestImage
 import app.aemu.core.VmSettings
 
@@ -114,12 +115,15 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings) -
                 if (has32) stringResource(R.string.vs_native32_sub) else stringResource(R.string.vs_native32_unsupported),
                 s.native32 && has32
             ) { if (has32) s = s.copy(native32 = it) }
+            if (img.engine == Engine.N64 && img.api >= 21)
+                Toggle(stringResource(R.string.vs_abi32), stringResource(R.string.vs_abi32_sub), s.abi32) { s = s.copy(abi32 = it) }
             val ramIdx = ramIndex(s.ramMb)
             ListItem(
                 headlineContent = { Text(stringResource(R.string.vs_ram)) },
                 supportingContent = {
                     Column {
-                        Text(if (s.ramMb == 0) stringResource(R.string.vs_ram_auto) else "${s.ramMb} MB")
+                        Text(if (s.ramMb == 0) stringResource(R.string.vs_ram_auto_mb, GuestRunner.guestRamMb(img.api, 0))
+                             else "${s.ramMb} MB")
                         Slider(value = ramIdx.toFloat(), onValueChange = { s = s.copy(ramMb = RAM_STEPS[it.toInt()]) },
                             valueRange = 0f..RAM_STEPS.lastIndex.toFloat(), steps = RAM_STEPS.size - 2)
                     }

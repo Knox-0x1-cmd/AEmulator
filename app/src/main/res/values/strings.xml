@@ -47,6 +47,8 @@
     <string name="vs_native32">Hardware 32-bit execution</string>
     <string name="vs_native32_sub">Direct execution on CPU (AArch32 EL0) bypassing translators; huge performance boost.</string>
     <string name="vs_native32_unsupported">Hardware 32-bit (AArch32 EL0) is not supported by your device CPU; QEMU translation used.</string>
+    <string name="vs_abi32">32-bit apps</string>
+    <string name="vs_abi32_sub">Start the second (translated) zygote for 32-bit-only apps. Off by default on 8 GB phones: it costs memory and minutes of boot time.</string>
     <string name="vs_lowram">Low memory mode</string>
     <string name="vs_lowram_sub">ro.config.low_ram — the system saves memory.</string>
     <string name="vs_proxy">Modern TLS proxy</string>
@@ -112,6 +114,7 @@
     <string name="vs_dpi">DPI</string>
     <string name="vs_ram">Guest RAM</string>
     <string name="vs_ram_auto">Automatic</string>
+    <string name="vs_ram_auto_mb">Automatic · %1$d MB</string>
     <string name="vs_radio_title">Radio</string>
     <string name="vs_radio">Emulate radio module</string>
     <string name="vs_radio_sub">Telephony, IMEI and signal. Off: the firmware behaves like a Wi-Fi tablet</string>

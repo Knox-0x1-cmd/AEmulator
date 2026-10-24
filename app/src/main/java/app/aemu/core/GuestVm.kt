@@ -34,6 +34,8 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     val kernel: Kernel64 get() = Kernel64.forApi(img.api)
     val settings get() = img.settings
     val engine get() = img.engine
+    /** Fixed at start: the image's /proc/meminfo, the keeper and the failure message all use this one number. */
+    val ramBudgetMb = GuestRunner.guestRamMb(img.api, img.settings.ramMb)
 
     @Volatile var state = State.STOPPED
         private set
@@ -242,6 +244,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         val qemu = paths.nativeBin(if (engine == Engine.N64) kernel.runner else engine.qemu)
         if (!qemu.canExecute()) error("translator ${qemu.name} is not executable")
         if (engine == Engine.N64) log("· kernel ${kernel.tag} (${kernel.runner})")
+        log("· guest RAM $ramBudgetMb MB (${if (settings.ramMb == 0) "automatic" else "chosen"})")
         // the guest's SwiftShader (legacy, reads SwiftShader.ini from the process's directory, this one) finds one core
         // on Android and draws every frame in a single thread: MIUI 8 at 1080×1920 flipped pages at 19 fps, 59 with 8.
         // Every N64 kernel ships that build (n64-gl), and the guest's services and apps all run in this directory
@@ -321,9 +324,17 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
                 overrides["ro.product.cpu.abilist64"] = "arm64-v8a"
                 overrides["ro.product.cpu.abilist32"] = ""
             }
+            // The first boot of a modern image (package scan, class verification, dexopt) can keep a
+            // system_server handler busy for minutes. Watchdog's default is 60 s, and its timeout action is
+            // SIGKILL of system_server: that, not RAM, ended the Android 15 boot at 1.9 GB free. The property
+            // multiplies every hardware timeout (Build.HW_TIMEOUT_MULTIPLIER, used by Watchdog.java), which is
+            // what slow emulators set. A boot that really deadlocks still fails, just after 10 minutes.
+            if (img.api >= 26) overrides["ro.hw_timeout_multiplier"] = "10"
         }
         overrides["dalvik.vm.execution-mode"] = if (s.jit) "int:jit" else "int:fast"
-        if (s.lowRam || s.ramMb in 1..768) overrides["ro.config.low_ram"] = "true"
+        // On a 2 GB budget (an 8 GB phone with One UI) low-RAM mode is what keeps system_server and the
+        // preloaded zygote small: ART also drops its background GC and shrinks the heap when it is set.
+        if (s.lowRam || (img.api >= 26 && ramBudgetMb <= 2048)) overrides["ro.config.low_ram"] = "true"
         if (s.ramMb > 0) {
             // Dalvik heap sized from the guest RAM budget (like a real device of that class)
             val heap = (s.ramMb / 4).coerceIn(32, 512)
@@ -491,12 +502,11 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         // the RAM the guest is told it has (its /proc/meminfo, scaled by the kernel): the framework sizes its background by it
         if (engine == Engine.N64) runCatching {
             val f = File(paths.root, "dev/.aemu-ram")
-            if (kernel.ramBudget) f.writeText((GuestRunner.guestRamMb(img.api, s.ramMb) * 1024L).toString()) else f.delete()
+            if (kernel.ramBudget) f.writeText((ramBudgetMb * 1024L).toString()) else f.delete()
         }
         // The keeper used to get s.ramMb, which is 0 in "Automatic": the budget was then never enforced and
         // background services grew until the phone killed something. It gets the budget the image was told.
-        val ramBudget = GuestRunner.guestRamMb(img.api, s.ramMb)
-        lmk = GuestLmk(paths.root, s.lowRam, ::log, ramBudget).also { it.start() }
+        lmk = GuestLmk(paths.root, s.lowRam, ::log, ramBudgetMb).also { it.start() }
         val netCfg = if (s.netProxy) net.start() else GuestRunner.NetConfig()
         runner.sdcardHost = sd
         val r = GuestRunner(paths, img, netCfg.copy(glPath = if (s.gpu) "/dev/socket/gl" else null)).also {
@@ -692,7 +702,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     /** guest files this kernel ships (asset names) */
     private val engineFiles: Set<String> by lazy { listOf("engines/n64-${kernel.tag}", kernel.gsiAssets).flatMap { runCatching { EngineAssets.list(ctx, it) }.getOrNull().orEmpty().asList() }.toSet() }
 
-    private val n64Has32: Boolean get() = paths.nativeBin("libqemu_arm.so").canExecute() &&
+    private val n64Has32: Boolean get() = settings.abi32 && paths.nativeBin("libqemu_arm.so").canExecute() &&
             File(paths.root, "system/bin/app_process32").isFile
 
     val glInApp: Boolean get() = engine == Engine.KK && GlBridge.running()
@@ -1059,9 +1069,12 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     private fun deathReason(p: Process?, code: Int): String {
         if (code != 137) return ""
         val pid = pidOf(p)
-        val budget = GuestRunner.guestRamMb(img.api, settings.ramMb)
+        val budget = ramBudgetMb
         if (lmk?.wasKilled(pid) == true)
             return " — killed by the emulator's memory keeper (guest RAM budget $budget MB): raise Guest RAM or turn off Low memory mode"
+        // The reason a modern system_server was SIGKILLed is in the system buffer, not in main: Watchdog writes
+        // "*** WATCHDOG KILLING SYSTEM PROCESS" and the blocked handler there right before killing it.
+        systemFatal()?.let { return " — Android's Watchdog killed system_server ($it); RAM was not the cause" }
         val avail = runCatching {
             File("/proc/meminfo").useLines { l -> l.first { it.startsWith("MemAvailable:") } }.split(Regex("\\s+"))[1].toLong() / 1024
         }.getOrNull()
@@ -1212,6 +1225,19 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             synchronized(procs) { procs.remove("zygote_secondary") }?.let { runCatching { it.destroyForcibly() } }
             runCatching { startService(z2) }
         }
+    }
+
+    /** The line that explains a system_server SIGKILL: Watchdog's own message from the system buffer. */
+    private fun systemFatal(): String? {
+        val r = runCatching {
+            GuestLog.tail(paths.root, 384 * 1024, "system").lastOrNull { rec ->
+                rec.msg.contains("WATCHDOG KILLING SYSTEM PROCESS") || rec.msg.contains("FATAL EXCEPTION IN SYSTEM PROCESS") ||
+                    rec.msg.contains("Blocked in handler") || rec.msg.contains("Blocked in monitor") ||
+                    rec.msg.contains("Watchdog timeout")
+            }
+        }.getOrNull() ?: return null
+        val line = r.msg.trim().lineSequence().firstOrNull().orEmpty().take(220)
+        return if (line.isEmpty()) null else "${r.tag}: $line"
     }
 
     private fun guestLogHas(text: String): Boolean = runCatching {

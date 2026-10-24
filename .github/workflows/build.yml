@@ -1,0 +1,157 @@
+name: Build APK
+
+# Builds the two installable flavours on every push and publishes a GitHub
+# release when a tag is pushed (tags in this repo look like 0.0.0.4 or v0.0.0.4).
+#
+# Signing: if the repository has KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS /
+# KEY_PASSWORD secrets, the release key is used. Without them the APK is signed
+# with a throwaway key, so it installs but cannot update an official build.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*', '[0-9]*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Publish a GitHub release after building'
+        type: boolean
+        default: false
+      release_tag:
+        description: 'Tag for the release (empty = build-<date>)'
+        type: string
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager --licenses > /dev/null
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Read version
+        id: version
+        run: |
+          V=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
+          [ -n "$V" ] || V="0.0.0"
+          echo "name=$V" >> "$GITHUB_OUTPUT"
+          echo "Building AEmulator $V"
+
+      # gradle.properties in this repo pins org.gradle.java.home to a Windows path;
+      # it is stripped there for portability, this guards against it coming back.
+      - name: Sanitise Gradle properties
+        run: sed -i '/^org\.gradle\.java\.home=/d' gradle.properties
+
+      - name: Configure signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then
+            echo "Using the release keystore from repository secrets"
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > ci.keystore
+            ALIAS="${KEY_ALIAS:-aemulator}"
+            PASS="${KEYSTORE_PASSWORD:?KEYSTORE_PASSWORD is required with KEYSTORE_BASE64}"
+            KEYPASS="${KEY_PASSWORD:-$PASS}"
+          else
+            echo "::warning::No KEYSTORE_BASE64 secret: signing with a throwaway key. This APK will not update an official install."
+            ALIAS="aemulator-ci"
+            PASS="$(openssl rand -hex 16)"
+            KEYPASS="$PASS"
+            keytool -genkeypair -keystore ci.keystore -storepass "$PASS" -keypass "$KEYPASS" \
+              -alias "$ALIAS" -keyalg RSA -keysize 4096 -validity 10000 \
+              -dname "CN=AEmulator CI, O=AEmulator, C=US" > /dev/null 2>&1
+          fi
+          printf 'storeFile=ci.keystore\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "$PASS" "$ALIAS" "$KEYPASS" > keystore.properties
+
+      - name: Build
+        run: ./gradlew --stacktrace assembleStandardRelease assembleV0003Release
+
+      - name: Collect APKs
+        env:
+          VERSION: ${{ steps.version.outputs.name }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp app/build/outputs/apk/standard/release/*.apk "out/aemulator-${VERSION}.apk"
+          cp app/build/outputs/apk/v0003/release/*.apk   "out/aemulator-${VERSION}-v0003.apk"
+          cd out && sha256sum ./*.apk > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aemulator-apks
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/') || inputs.release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: aemulator-apks
+          path: out
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          INPUT_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            TAG="$GITHUB_REF_NAME"
+          elif [ -n "${INPUT_TAG:-}" ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="build-$(date -u +%Y%m%d-%H%M)"
+          fi
+          TITLE="AEmulator $VERSION"
+          [ "$TAG" = "$VERSION" ] || TITLE="AEmulator $VERSION ($TAG)"
+          echo "Publishing $TAG"
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$TAG" out/*.apk out/SHA256SUMS.txt -R "$GITHUB_REPOSITORY" --clobber
+          elif [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            gh release create "$TAG" out/*.apk out/SHA256SUMS.txt -R "$GITHUB_REPOSITORY" \
+              --title "$TITLE" --generate-notes
+          else
+            gh release create "$TAG" out/*.apk out/SHA256SUMS.txt -R "$GITHUB_REPOSITORY" \
+              --title "$TITLE" --generate-notes --target "$GITHUB_SHA"
+          fi

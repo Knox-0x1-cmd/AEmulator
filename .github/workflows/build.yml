@@ -48,13 +48,34 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # android-actions/setup-android is not used on purpose: its latest release still
+      # runs `sdkmanager "tools"`, a package that no longer exists in the repository,
+      # so the step fails before Gradle even starts. GitHub's Ubuntu images already
+      # ship the SDK and sdkmanager; only the packages this project needs are added.
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install SDK packages
         run: |
-          yes | sdkmanager --licenses > /dev/null
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          if [ ! -d "$SDK" ]; then
+            echo "::error::No Android SDK found at $SDK"
+            exit 1
+          fi
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+
+          SDKM="$(command -v sdkmanager || true)"
+          if [ -z "$SDKM" ]; then
+            SDKM="$(ls -d "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -V | tail -1 || true)"
+          fi
+          if [ -z "$SDKM" ]; then
+            echo "::error::sdkmanager not found under $SDK"
+            exit 1
+          fi
+          echo "Using $SDKM"
+
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" --install "platforms;android-36" "build-tools;36.0.0" "platform-tools"
+          echo "$SDK/platform-tools" >> "$GITHUB_PATH"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4

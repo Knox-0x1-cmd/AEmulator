@@ -27,7 +27,11 @@ Android only installs an update when the signature matches the installed app.
 
 * **With secrets** — the release key is used and the APK updates an existing install.
 * **Without secrets** — a throwaway key is generated per run. The APK installs on a clean
-  phone but cannot update an official AEmulator build.
+  phone but cannot update an official AEmulator build, nor a build made by another CI run.
+
+This fork has the four secrets configured, so all of its builds share one signature.
+GitHub secrets cannot be read back: if the keystore is ever lost, a new one can be made,
+but the first build signed with it will need one uninstall/reinstall on each device.
 
 Add these repository secrets (Settings → Secrets and variables → Actions):
 

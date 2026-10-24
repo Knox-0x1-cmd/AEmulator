@@ -108,7 +108,7 @@ jobs:
             PASS="${KEYSTORE_PASSWORD:?KEYSTORE_PASSWORD is required with KEYSTORE_BASE64}"
             KEYPASS="${KEY_PASSWORD:-$PASS}"
           else
-            echo "::warning::No KEYSTORE_BASE64 secret: signing with a throwaway key. This APK will not update an official install."
+            echo "::warning::No KEYSTORE_BASE64 secret: signing with a throwaway key. This APK will not update any previous install."
             ALIAS="aemulator-ci"
             PASS="$(openssl rand -hex 16)"
             KEYPASS="$PASS"

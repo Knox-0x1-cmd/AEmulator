@@ -94,7 +94,9 @@ class TreeFixer(
 
     /** Removes links whose host target leaves the image; the importer's own links stay relative. */
     private fun sanitizeLinks() {
-        val base = runCatching { root.canonicalFile.toPath() }.getOrNull() ?: return
+        // lexical on purpose: /data/user/0 may be a symlink to /data/data, and canonicalising only
+        // one side would reject every legitimate link in the tree
+        val base = root.toPath().normalize()
         var dropped = 0
         fun walk(d: File) {
             for (f in d.listFiles() ?: return) {

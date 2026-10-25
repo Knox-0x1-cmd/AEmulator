@@ -14,6 +14,7 @@ DIR=${2:-../../../app/src/main/jniLibs/arm64-v8a}
 OUT="$DIR/libaemu64_$TAG.so"
 "$BIN/clang" --target=aarch64-linux-android26 -O2 -static -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -mno-outline-atomics \
   -fno-pic -no-pie -Wall -Wno-unused-function -Wl,--image-base=0x2000000000 -Wl,--build-id=none -Wl,-z,norelro \
+  -Wl,-z,max-page-size=16384 \
   -o "$OUT" start.S run64.c || exit 1
 "$BIN/llvm-strip" "$OUT" 2>/dev/null || true
 # binderd64: the binder driver in user space for those programs (an ordinary host program)

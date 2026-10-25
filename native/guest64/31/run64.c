@@ -1041,7 +1041,27 @@ static long trap2(long nr, long *a, void *uc, char **pbp) {
     }
     case NR_getsockopt: {
         if (is_nl_fd((int)a[0])) return 0;
-        return S5(nr, a[0], a[1], a[2], a[3], a[4]);
+        long r = S5(nr, a[0], a[1], a[2], a[3], a[4]);
+        // SO_PEERCRED: every guest process is the host app's uid. The peer left the ids the guest gave it in
+        // <root>/dev/.aemu-ids/<pid> (zygote of 12 with the 2024 security patch: "Only system UID is allowed to
+        // connect to Zygote").
+        if (r == 0 && a[1] == 1 && a[2] == 17 && a[3] && a[4] && *(u32 *)a[4] >= 12) {
+            u32 *uc3 = (u32 *)a[3];             // struct ucred: pid, uid, gid
+            char p[512], t[48];
+            uc3[1] = uc3[2] = 0;
+            if (ids_path(p, (long)uc3[0])) {
+                long fd = S4(NR_openat, AT_FDCWD, p, 02000000, 0);
+                if (fd >= 0) {
+                    long n = S3(NR_read, fd, t, sizeof t - 1); S1(NR_close, fd);
+                    if (n > 0) {
+                        t[n] = 0;
+                        char *g = t; while (*g && *g != ' ') g++;
+                        uc3[1] = (u32)atou(t); if (*g) uc3[2] = (u32)atou(g + 1);
+                    }
+                }
+            }
+        }
+        return r;
     }
     case NR_sendto: {
         if (is_nl_fd((int)a[0])) {

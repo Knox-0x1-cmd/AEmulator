@@ -214,25 +214,28 @@ class GuestRunner(
          * Guest RAM budget in MB: what the image is told its phone has (/proc/meminfo, the Dalvik heap,
          * the activity manager's background limits).
          *
-         * Auto used to stop at 4096, so an Android 13+ image on a 12 GB phone sized itself for a mid-range
-         * device and could not use the RAM that was there. It follows the phone up to 8 GB, but never more
-         * than half of it. On an 8 GB phone the guest gets 2 GB, not 3.7: a stock One UI phone keeps 4-5 GB
-         * for itself, and Android 15 boots and runs in 2. The guest processes are real processes of this
-         * app; sizing the guest by total RAM alone made it eat the phone's last free gigabyte.
+         * Auto follows the phone up to 12 GB, but never more than half of it. An Android 8+ image on an
+         * 8 GB phone gets 3.5 GB: One UI keeps 3-4 GB for itself, and the earlier 2 GB budget left the
+         * framework permanently in low-RAM mode even though the guest had room to run. An explicit choice
+         * is capped by the same half-of-RAM rule, so the app cannot hand out memory the phone needs; the
+         * settings sheet shows the effective value. The guest processes are real processes of this app,
+         * so the cap is about leaving the host enough to keep system_server alive.
          */
         fun guestRamMb(api: Int, chosen: Int): Int {
-            if (chosen > 0) return chosen.coerceAtMost(MAX_GUEST_MB)
             val hostMb = HostInfo.ramMb
+            val cap = (hostMb / 2).toInt().coerceIn(MIN_GUEST_MB, MAX_GUEST_MB)
+            if (chosen > 0) return chosen.coerceAtMost(cap).coerceAtLeast(MIN_GUEST_MB)
             val typical = when {
                 api <= 10 -> 512
                 api <= 15 -> 1024
                 api <= 19 -> 2048
                 api <= 23 -> 3072
                 api <= 25 -> 4096
-                hostMb <= 8192 -> 2048
+                hostMb <= 6144 -> 2048
+                hostMb <= 8192 -> 3584
                 else -> 6144
             }
-            return typical.coerceAtMost((hostMb / 2).toInt()).coerceAtMost(MAX_GUEST_MB).coerceAtLeast(MIN_GUEST_MB)
+            return typical.coerceAtMost(cap).coerceAtMost(MAX_GUEST_MB).coerceAtLeast(MIN_GUEST_MB)
         }
 
         /** More than this is never handed to one image, whatever the phone has. */

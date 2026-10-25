@@ -115,6 +115,9 @@
     <string name="vs_ram">Guest RAM</string>
     <string name="vs_ram_auto">Automatic</string>
     <string name="vs_ram_auto_mb">Automatic · %1$d MB</string>
+    <string name="vs_ram_effective">Using %1$d MB</string>
+    <string name="vs_ram_capped">%1$d MB chosen · using %2$d MB (half the phone\'s RAM)</string>
+    <string name="vs_ram_warn">Only %1$d MB is free on the phone right now. Free some RAM or pick a smaller budget, or Android may kill the guest.</string>
     <string name="vs_radio_title">Radio</string>
     <string name="vs_radio">Emulate radio module</string>
     <string name="vs_radio_sub">Telephony, IMEI and signal. Off: the firmware behaves like a Wi-Fi tablet</string>

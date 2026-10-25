@@ -36,6 +36,12 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
     val engine get() = img.engine
     /** Fixed at start: the image's /proc/meminfo, the keeper and the failure message all use this one number. */
     val ramBudgetMb = GuestRunner.guestRamMb(img.api, img.settings.ramMb)
+    /**
+     * Low-RAM mode as the guest sees it: the user's choice, or forced when an 8.0+ image gets a 2 GB budget.
+     * The framework property and [GuestLmk] must agree, otherwise the keeper keeps a host reserve the
+     * framework does not know about (or the other way around).
+     */
+    val lowRamMode = img.settings.lowRam || (img.api >= 26 && ramBudgetMb <= 2048)
 
     @Volatile var state = State.STOPPED
         private set
@@ -332,9 +338,10 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
             if (img.api >= 26) overrides["ro.hw_timeout_multiplier"] = "10"
         }
         overrides["dalvik.vm.execution-mode"] = if (s.jit) "int:jit" else "int:fast"
-        // On a 2 GB budget (an 8 GB phone with One UI) low-RAM mode is what keeps system_server and the
-        // preloaded zygote small: ART also drops its background GC and shrinks the heap when it is set.
-        if (s.lowRam || (img.api >= 26 && ramBudgetMb <= 2048)) overrides["ro.config.low_ram"] = "true"
+        // Low-RAM mode (the user's choice, or forced for an 8.0+ image with only a 2 GB budget) is what
+        // keeps system_server and the preloaded zygote small: ART also drops its background GC and shrinks
+        // the heap when it is set.
+        if (lowRamMode) overrides["ro.config.low_ram"] = "true"
         if (s.ramMb > 0) {
             // Dalvik heap sized from the guest RAM budget (like a real device of that class)
             val heap = (s.ramMb / 4).coerceIn(32, 512)
@@ -506,7 +513,7 @@ class GuestVm(val ctx: Context, val img: GuestImage) {
         }
         // The keeper used to get s.ramMb, which is 0 in "Automatic": the budget was then never enforced and
         // background services grew until the phone killed something. It gets the budget the image was told.
-        lmk = GuestLmk(paths.root, s.lowRam, ::log, ramBudgetMb).also { it.start() }
+        lmk = GuestLmk(paths.root, lowRamMode, ::log, ramBudgetMb).also { it.start() }
         val netCfg = if (s.netProxy) net.start() else GuestRunner.NetConfig()
         runner.sdcardHost = sd
         val r = GuestRunner(paths, img, netCfg.copy(glPath = if (s.gpu) "/dev/socket/gl" else null)).also {

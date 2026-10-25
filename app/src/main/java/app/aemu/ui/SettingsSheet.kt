@@ -44,6 +44,7 @@ import app.aemu.core.CpuInfo
 import app.aemu.core.Engine
 import app.aemu.core.GuestRunner
 import app.aemu.core.GuestImage
+import app.aemu.core.HostInfo
 import app.aemu.core.VmSettings
 
 private data class Res(val label: String, val w: Int, val h: Int, val dpi: Int)
@@ -54,10 +55,10 @@ private val RESOLUTIONS = listOf(
     Res("720×1280", 720, 1280, 320),
 )
 
-// Modern firmware is happiest with more than 4 GB (Android 13+ phones ship 6-8 GB); the
-// old ceiling of 4096 left most of a 12 GB phone unused. Anything above is still capped by
-// half of the phone's RAM in GuestRunner.guestRamMb().
-private val RAM_STEPS = listOf(0, 256, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288)
+// 3584 is the automatic budget of an Android 8+ image on an 8 GB phone; it stays on the slider so it
+// can be restored after experimenting. Anything above is still capped by half of the phone's RAM in
+// GuestRunner.guestRamMb().
+private val RAM_STEPS = listOf(0, 256, 512, 768, 1024, 1536, 2048, 3072, 3584, 4096, 6144, 8192, 12288)
 
 /** Index of the closest step: a value written by an older build is still shown, not silently reset to "Automatic". */
 private fun ramIndex(mb: Int): Int =
@@ -66,6 +67,9 @@ private fun ramIndex(mb: Int): Int =
 @Composable
 fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings) -> Unit) {
     var s by remember { mutableStateOf(img.settings) }
+    // one fresh reading per opening: MemAvailable moves with every app the phone starts, but Recomposition
+    // does not need to hit /proc/meminfo again
+    val freeRam = remember { HostInfo.availableRamMb() }
     val state = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = state) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).navigationBarsPadding()) {
@@ -118,14 +122,26 @@ fun SettingsSheet(img: GuestImage, onDismiss: () -> Unit, onSave: (VmSettings) -
             if (img.engine == Engine.N64 && img.api >= 21)
                 Toggle(stringResource(R.string.vs_abi32), stringResource(R.string.vs_abi32_sub), s.abi32) { s = s.copy(abi32 = it) }
             val ramIdx = ramIndex(s.ramMb)
+            val effectiveRam = GuestRunner.guestRamMb(img.api, s.ramMb)
+            val usableRam = (freeRam - HostInfo.RAM_RESERVE_MB).coerceAtLeast(0)
             ListItem(
                 headlineContent = { Text(stringResource(R.string.vs_ram)) },
                 supportingContent = {
                     Column {
-                        Text(if (s.ramMb == 0) stringResource(R.string.vs_ram_auto_mb, GuestRunner.guestRamMb(img.api, 0))
-                             else "${s.ramMb} MB")
+                        Text(
+                            when {
+                                s.ramMb == 0 -> stringResource(R.string.vs_ram_auto_mb, effectiveRam)
+                                effectiveRam < s.ramMb -> stringResource(R.string.vs_ram_capped, s.ramMb, effectiveRam)
+                                else -> stringResource(R.string.vs_ram_effective, effectiveRam)
+                            }
+                        )
                         Slider(value = ramIdx.toFloat(), onValueChange = { s = s.copy(ramMb = RAM_STEPS[it.toInt()]) },
                             valueRange = 0f..RAM_STEPS.lastIndex.toFloat(), steps = RAM_STEPS.size - 2)
+                        if (effectiveRam > usableRam) Text(
+                            stringResource(R.string.vs_ram_warn, freeRam),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
                     }
                 },
                 colors = ListItemDefaults.colors(containerColor = Color.Transparent),

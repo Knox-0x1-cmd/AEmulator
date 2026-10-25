@@ -112,6 +112,7 @@ class TreeFixer(
     fun fixup(owners: Boolean = true) {
         if (owners) seedOwners()
         installEngineFiles()
+        sanitizeVibratorManifests()
         protectOat()
         fixThemeXml()
         parkWhetstone()
@@ -143,6 +144,50 @@ class TreeFixer(
         keyLayout()
         for (n in LOGS) File(root, "dev/log/$n").let { if (!it.isFile) { it.parentFile?.mkdirs(); it.createNewFile() } }
         makeFb()
+    }
+
+    /**
+     * Android 15's VibratorManagerService asks for android.hardware.vibrator@1.0::IVibrator/default, and
+     * HIDL's getService retries forever when the device manifest declares the interface but no service
+     * registers it (hwservicemanager keeps trying to start it as a lazy HAL). This tree has no vibrator
+     * HAL at all: vibration is the phone's own, driven by the UI. Every vibrator <hal> block is therefore
+     * taken out of the merged and fragment manifests. With no declaration the transport is EMPTY and
+     * getService returns null at once, which the framework already handles as "no vibrator".
+     *
+     * The original is copied to system/.aemu-parked before the rewrite; fixup runs before every boot, so
+     * images imported by older builds get the fix too.
+     */
+    private fun sanitizeVibratorManifests() {
+        val blocks = Regex("""<hal\b[^>]*>.*?</hal>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
+        val dirs = listOf("system", "system_ext", "product", "vendor", "odm", "system/vendor").map { File(root, "$it/etc/vintf") } +
+            File(root, "apex").listFiles().orEmpty().filter { it.isDirectory }.map { File(it, "etc/vintf") }
+        var n = 0
+        for (dir in dirs) {
+            val manifests = ArrayList<File>()
+            File(dir, "manifest.xml").takeIf { it.isFile }?.let { manifests += it }
+            manifests += File(dir, "manifest").listFiles().orEmpty().filter { it.isFile && it.name.endsWith(".xml") }
+            for (f in manifests) {
+                val text = runCatching { f.readText() }.getOrNull() ?: continue
+                if (!text.contains("android.hardware.vibrator")) continue
+                val out = blocks.replace(text) { m -> if (m.value.contains("android.hardware.vibrator")) "" else m.value }
+                if (out == text) continue
+                val rel = f.relativeTo(root).path.replace('/', '#')
+                val parked = File(root, "system/.aemu-parked/$rel")
+                runCatching {
+                    if (!parked.exists()) {
+                        parked.parentFile?.mkdirs()
+                        f.copyTo(parked)
+                    }
+                    f.setWritable(true)
+                    f.writeText(out)
+                }.onSuccess {
+                    n++
+                    log("${f.relativeTo(root).path}: vibrator HAL declaration removed (this phone has none)")
+                }.onFailure { log("${f.relativeTo(root).path}: vibrator declaration: ${it.message}") }
+            }
+        }
+        if (n > 0) log("VINTF: $n vibrator declaration(s) set aside")
+        else log("VINTF: no vibrator HAL declaration in the manifests")
     }
 
     /**

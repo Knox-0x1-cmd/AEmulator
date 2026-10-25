@@ -92,11 +92,22 @@ object ImageStore {
             to.root.mkdirs()
             val skipData = setOf("data", "system", "user", "property", "anr", "tombstones", "backup", "misc/wifi", "misc/keystore",
                 "local/tmp", "app", "app-private", "app-asec")
+            val sourceRoot = runCatching { from.root.canonicalFile }.getOrNull()
             fun copy(a: File, b: File, rel: String) {
                 if (cancelled()) error("cancelled")
                 val st = runCatching { Os.lstat(a.path) }.getOrNull() ?: return
                 when {
-                    android.system.OsConstants.S_ISLNK(st.st_mode) -> runCatching { Os.symlink(Os.readlink(a.path), b.path) }
+                    android.system.OsConstants.S_ISLNK(st.st_mode) -> {
+                        val target = Os.readlink(a.path)
+                        // do not carry a link that leaves the source image into the clone
+                        val real = runCatching {
+                            if (target.startsWith("/")) File(target).canonicalFile else File(a.parentFile, target).canonicalFile
+                        }.getOrNull()
+                        if (sourceRoot != null && real != null &&
+                            (real == sourceRoot || real.path.startsWith(sourceRoot.path + File.separator))) {
+                            runCatching { Os.symlink(target, b.path) }
+                        }
+                    }
                     android.system.OsConstants.S_ISDIR(st.st_mode) -> {
                         b.mkdirs()
                         for (c in a.list().orEmpty()) {

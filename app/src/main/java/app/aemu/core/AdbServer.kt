@@ -267,7 +267,9 @@ class AdbServer(private val vm: GuestVm) {
             }
             i++
         }
-        val names = buffers.ifEmpty { listOf("main", "system") }.distinct()
+        // a client must not choose ../../.. as the buffer file name
+        val names = buffers.ifEmpty { listOf("main", "system") }
+            .filter { it.matches(Regex("[A-Za-z0-9_-]{1,32}")) }.distinct()
         val offsets = HashMap<String, Long>()
         fun emit(name: String) {
             val f = File(vm.paths.root, "dev/log/$name")
@@ -300,10 +302,34 @@ class AdbServer(private val vm: GuestVm) {
         val sd = Sdcard.hostDir(vm.paths)
         if (sd != null) for (pre in Sdcard.guestPaths(vm.img)) {
             val g = "/$pre"
-            if (p == g) return sd
-            if (p.startsWith("$g/")) return File(sd, p.removePrefix("$g/"))
+            if (p == g) return contained(sd, sd)
+            if (p.startsWith("$g/")) return contained(File(sd, p.removePrefix("$g/")), sd)
         }
-        return if (p == "/") vm.paths.root else File(vm.paths.root, p.removePrefix("/"))
+        val root = vm.paths.root
+        return contained(if (p == "/") root else File(root, p.removePrefix("/")), root)
+    }
+
+    /**
+     * Sync touches host files directly, so a symlink inside an imported image (or on the shared
+     * card) must not lead outside it. Resolve the existing part and keep it under the image root
+     * or the card folder; the final component is checked for being a symlink before a push.
+     */
+    private fun contained(f: File, base: File): File {
+        val allowed = listOfNotNull(
+            runCatching { base.canonicalFile }.getOrNull(),
+            Sdcard.hostDir(vm.paths)?.let { runCatching { it.canonicalFile }.getOrNull() }
+        )
+        val real = runCatching { if (f.exists()) f.canonicalFile else f.parentFile?.canonicalFile }.getOrNull()
+            ?: throw SecurityException("cannot resolve ${f.name}")
+        if (allowed.none { real == it || real.path.startsWith(it.path + File.separator) }) {
+            throw SecurityException("path escapes the image")
+        }
+        return f
+    }
+
+    private fun fail(o: java.io.OutputStream, msg: String) {
+        val m = msg.toByteArray()
+        o.write(id4("FAIL")); o.write(le4(m.size)); o.write(m); o.flush()
     }
 
     private fun sync(s: Stream) {
@@ -321,29 +347,46 @@ class AdbServer(private val vm: GuestVm) {
             val arg = ByteArray(len).also { if (!readFully(i, it)) return }
             when (id) {
                 "STAT" -> {
-                    val f = host(String(arg))
-                    val st = runCatching { android.system.Os.stat(f.absolutePath) }.getOrNull()
-                    o.write(id4("STAT")); o.write(le4(st?.st_mode ?: 0)); o.write(le4((st?.st_size ?: 0).toInt())); o.write(le4((st?.st_mtime ?: 0).toInt()))
+                    val f = runCatching { host(String(arg)) }.getOrNull()
+                    if (f == null) fail(o, "path escapes the image") else {
+                        val st = runCatching { android.system.Os.stat(f.absolutePath) }.getOrNull()
+                        o.write(id4("STAT")); o.write(le4(st?.st_mode ?: 0)); o.write(le4((st?.st_size ?: 0).toInt())); o.write(le4((st?.st_mtime ?: 0).toInt()))
+                    }
                 }
                 "LIST" -> {
-                    val d = host(String(arg))
-                    for (name in listOf(".", "..") + (d.list()?.sorted() ?: emptyList())) {
-                        val f = if (name == "." || name == "..") d else File(d, name)
-                        val st = runCatching { android.system.Os.lstat(f.absolutePath) }.getOrNull() ?: continue
-                        val nb = name.toByteArray()
-                        o.write(id4("DENT")); o.write(le4(st.st_mode)); o.write(le4(st.st_size.toInt())); o.write(le4(st.st_mtime.toInt()))
-                        o.write(le4(nb.size)); o.write(nb)
+                    val d = runCatching { host(String(arg)) }.getOrNull()
+                    if (d == null) fail(o, "path escapes the image") else {
+                        for (name in listOf(".", "..") + (d.list()?.sorted() ?: emptyList())) {
+                            val f = if (name == "." || name == "..") d else File(d, name)
+                            val st = runCatching { android.system.Os.lstat(f.absolutePath) }.getOrNull() ?: continue
+                            val nb = name.toByteArray()
+                            o.write(id4("DENT")); o.write(le4(st.st_mode)); o.write(le4(st.st_size.toInt())); o.write(le4(st.st_mtime.toInt()))
+                            o.write(le4(nb.size)); o.write(nb)
+                        }
+                        o.write(id4("DONE")); o.write(ByteArray(16))
                     }
-                    o.write(id4("DONE")); o.write(ByteArray(16))
                 }
                 "SEND" -> {
                     val spec = String(arg)
                     val path = spec.substringBeforeLast(',')
                     val mode = spec.substringAfterLast(',', "420").toIntOrNull() ?: 420
-                    val f = host(path)
                     var err: String? = null
-                    runCatching { f.parentFile?.mkdirs(); if (f.isDirectory) error("is a directory") }.onFailure { err = it.message }
-                    val fo = if (err == null) runCatching { f.outputStream().buffered(65536) }.onFailure { err = it.message }.getOrNull() else null
+                    val target = runCatching { host(path) }.onFailure { err = it.message ?: "invalid path" }.getOrNull()
+                    if (err == null && target != null) {
+                        // never write through a link: its target may be outside the image or dangling
+                        val st = runCatching { android.system.Os.lstat(target.absolutePath) }.getOrNull()
+                        if (st != null && android.system.OsConstants.S_ISLNK(st.st_mode)) {
+                            err = "is a symbolic link"
+                        } else {
+                            runCatching {
+                                target.parentFile?.mkdirs()
+                                if (target.isDirectory) error("is a directory")
+                            }.onFailure { err = it.message }
+                        }
+                    }
+                    val fo = if (err == null && target != null) {
+                        runCatching { target.outputStream().buffered(65536) }.onFailure { err = it.message }.getOrNull()
+                    } else null
                     while (true) {
                         if (!readFully(i, h)) { fo?.close(); return }
                         val cid = String(h, 0, 4, Charsets.ISO_8859_1); val n = le(h, 4)
@@ -353,22 +396,23 @@ class AdbServer(private val vm: GuestVm) {
                             if (fo != null && err == null) runCatching { fo.write(chunk) }.onFailure { err = it.message }
                         } else if (cid == "DONE") {
                             runCatching { fo?.close() }
-                            if (err == null) {
-                                f.setReadable(true, false)
-                                if (mode and 0x49 != 0) f.setExecutable(true, false)
-                                if (n > 0) f.setLastModified(n.toLong() * 1000)
+                            if (err == null && target != null) {
+                                target.setReadable(true, false)
+                                if (mode and 0x49 != 0) target.setExecutable(true, false)
+                                if (n > 0) target.setLastModified(n.toLong() * 1000)
                             }
                             break
                         } else { err = "unexpected $cid"; fo?.close(); break }
                     }
                     if (err == null) { o.write(id4("OKAY")); o.write(ByteArray(4)) }
-                    else { val m = "${f.name}: $err".toByteArray(); o.write(id4("FAIL")); o.write(le4(m.size)); o.write(m) }
+                    else fail(o, "${target?.name ?: path}: $err")
                 }
                 "RECV" -> {
-                    val f = host(String(arg))
-                    if (!f.isFile) {
-                        val m = "remote object '${String(arg)}' does not exist".toByteArray()
-                        o.write(id4("FAIL")); o.write(le4(m.size)); o.write(m)
+                    val f = runCatching { host(String(arg)) }.getOrNull()
+                    if (f == null) {
+                        fail(o, "path escapes the image")
+                    } else if (!f.isFile) {
+                        fail(o, "remote object '${String(arg)}' does not exist")
                     } else {
                         f.inputStream().use { fi ->
                             val buf = ByteArray(64 * 1024)

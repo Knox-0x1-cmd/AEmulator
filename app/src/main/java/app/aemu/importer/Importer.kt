@@ -150,7 +150,7 @@ class Importer(
     /** RAR 4 (junrar): entries handled like those of a zip, via temporary files. */
     private fun importRar(src: RandomSource, name: String, depth: Int) {
         val whole = File(tmp, "${System.nanoTime()}-whole.rar")
-        streamOf(src).use { i -> whole.outputStream().use { o -> i.copyTo(o, 1 shl 20) } }
+        streamOf(src).use { i -> whole.outputStream().use { o -> copyLimited(i, o, 16L * 1024 * 1024 * 1024, "RAR archive") } }
         try {
             com.github.junrar.Archive(whole).use { a ->
                 val nested = ArrayList<Pair<File, String>>()
@@ -216,6 +216,14 @@ class Importer(
 
     private fun checkTotal() {
         if (bytes > maxTotalBytes) throw IOException("the image is larger than ${maxTotalBytes shr 30} GB")
+        if (files > MAX_FILES) throw IOException("the image has more than $MAX_FILES files")
+    }
+
+    /** Archive paths are attacker-controlled: resolve links and require the result to stay in the image. */
+    private fun insideRoot(f: File): Boolean {
+        val r = root.canonicalPath
+        val p = f.canonicalPath
+        return p == r || p.startsWith(r + File.separator)
     }
 
     private var zipChannel: FileChannel? = null
@@ -230,7 +238,8 @@ class Importer(
     }
 
     private fun importZipEntries(zip: ZipFile, name: String, depth: Int) {
-        val entries = zip.entries.toList()
+        val entries = zip.entries.asSequence().take(MAX_ENTRIES + 1).toList()
+        if (entries.size > MAX_ENTRIES) throw IOException("the archive has more than $MAX_ENTRIES entries")
         val total = entries.sumOf { maxOf(0L, it.size) }.coerceAtLeast(1)
         var done = 0L
         // сначала — сценарий установки (ссылки и права)
@@ -409,6 +418,18 @@ class Importer(
         return t
     }
 
+    private fun copyLimited(i: InputStream, o: java.io.OutputStream, max: Long, what: String) {
+        val b = ByteArray(1 shl 20)
+        var total = 0L
+        while (true) {
+            val n = i.read(b)
+            if (n < 0) break
+            total += n
+            if (total > max) throw IOException("$what is larger than ${max shr 30} GB")
+            o.write(b, 0, n)
+        }
+    }
+
     /** [under]: the tar itself as a random-access source, when [s] reads it from its first byte (a tar that is the
      *  file being imported, not one inside a compressed stream or another archive) */
     private fun importTarStream(s: InputStream, name: String, depth: Int, under: RandomSource? = null) {
@@ -454,7 +475,7 @@ class Importer(
                     // файлы корня (рамдиск, dhd.*) берём, только если архив — целое дерево rootfs
                     if (fullRoot != true && !n.startsWith("system") && !(n.startsWith("dhd.") || n.endsWith(".rc") || n == "default.prop" || n.startsWith("sbin"))) continue
                     when {
-                        e.isDirectory -> File(root, n).mkdirs()
+                        e.isDirectory -> mkdirInRoot(n)
                         e.isSymbolicLink -> symlinks.add(e.linkName to "/$n")
                         e.isLink -> hardlink(n, e.linkName)
                         e.isFile -> {
@@ -467,7 +488,7 @@ class Importer(
                 name.contains("system", true) && name.endsWith(".win", true) -> {
                     val p = "system/$n"
                     when {
-                        e.isDirectory -> File(root, p).mkdirs()
+                        e.isDirectory -> mkdirInRoot(p)
                         e.isSymbolicLink -> symlinks.add(e.linkName to "/$p")
                         e.isFile -> { writeFile(p, tar.nonClosing(), e.mode); gotSystem = true }
                     }
@@ -482,9 +503,15 @@ class Importer(
     private fun maybeLz4(s: InputStream, name: String): InputStream =
         if (name.endsWith(".lz4", true)) org.apache.commons.compress.compressors.lz4.FramedLZ4CompressorInputStream(s.nonClosing()) else s.nonClosing()
 
+    private fun mkdirInRoot(rel: String) {
+        val f = File(root, rel)
+        if (insideRoot(f)) f.mkdirs()
+    }
+
     private fun hardlink(n: String, target: String) {
         val src = File(root, target.removePrefix("./").trimStart('/'))
         val dst = File(root, n)
+        if (!insideRoot(src) || !insideRoot(dst)) return
         if (src.isFile) { dst.parentFile?.mkdirs(); src.copyTo(dst, overwrite = true) }
     }
 
@@ -522,7 +549,7 @@ class Importer(
             if (cancelled) throw IOException("cancelled")
             val rel = "$mount/$path"
             val f = File(root, rel)
-            if (!f.canonicalPath.startsWith(root.canonicalPath)) return@walk
+            if (!insideRoot(f)) return@walk
             when {
                 isDir -> f.mkdirs()
                 link != null -> symlinks.add(link to "/$rel")
@@ -547,7 +574,7 @@ class Importer(
             // the system partition is read out of the SIN itself (a copy of the SIN takes far less room than the
             // unpacked partition); the layouts that cannot be read in place are unpacked as before
             if (base.startsWith("system", true)) {
-                s.use { i -> raw.outputStream().use { o -> i.copyTo(o, 1 shl 20) } }
+                s.use { i -> raw.outputStream().use { o -> copyLimited(i, o, 16L * 1024 * 1024 * 1024, "SIN image") } }
                 if (cancelled) throw IOException("cancelled")
                 val inPlace = FileChannel.open(raw.toPath(), StandardOpenOption.READ).use { c ->
                     SinImage.source(c)?.also { importImage(it, "system") } != null
@@ -666,13 +693,13 @@ class Importer(
 
     private fun writeFile(rel: String, i: InputStream, mode: Int?) {
         val f = File(root, rel)
-        if (!f.canonicalPath.startsWith(root.canonicalPath)) return // защита от ../ в архиве
+        if (!insideRoot(f)) return // защита от ../ в архиве
         f.parentFile?.mkdirs()
         if (runCatching { android.system.OsConstants.S_ISLNK(Os.lstat(f.path).st_mode) }.getOrDefault(false)) f.delete()
         f.outputStream().buffered(1 shl 20).use { o -> bytes += i.copyTo(o, 1 shl 16) }
+        files++
         checkTotal()
         if (mode != null) applyMode(f, mode and 0xfff)
-        files++
     }
 
     private fun applyMode(f: File, perm: Int) {
@@ -712,6 +739,7 @@ class Importer(
             val n = e.name
             if (n.isEmpty() || n == "." || n.startsWith("system/") || n.startsWith("data/") || n.startsWith("dev/") || n.startsWith("proc") || n.startsWith("sys/")) return@forEach
             val f = File(root, n)
+            if (!insideRoot(f)) return@forEach
             when (type) {
                 0x4000 -> f.mkdirs()
                 0xA000 -> symlinks.add(String(e.data) to "/$n")
@@ -722,13 +750,16 @@ class Importer(
                 }
             }
         }
+        if (symlinks.size > MAX_LINKS) throw IOException("the image has more than $MAX_LINKS symlinks")
         var made = 0
         for ((target, link) in symlinks) {
             val rel = link.trimStart('/')
             val f = File(root, rel)
-            if (!f.canonicalPath.startsWith(root.canonicalPath)) continue
+            if (!insideRoot(f)) continue
             f.parentFile?.mkdirs()
             val t = relTarget(link, target)
+            // a link like ../../../../data is legal in the guest's "/" but on the phone it leaves the image
+            if (!linkStaysInside(rel, t)) continue
             runCatching {
                 if (f.exists() || isLink(f)) { if (f.isDirectory && !isLink(f)) return@runCatching; f.delete() }
                 Os.symlink(t, f.absolutePath); made++
@@ -736,7 +767,10 @@ class Importer(
         }
         for ((p, mode, rec) in perms) {
             val f = File(root, p.trimStart('/'))
-            if (rec) f.walkTopDown().filter { it.isFile }.forEach { applyMode(it, mode) } else if (f.isFile) applyMode(f, mode)
+            if (!insideRoot(f)) continue
+            if (rec) f.walkTopDown().onEnter { it == f || !isLink(it) }
+                .filter { it.isFile && !isLink(it) }.forEach { applyMode(it, mode) }
+            else if (f.isFile && !isLink(f)) applyMode(f, mode)
         }
         // исполняемые — всё в bin/xbin/sbin
         for (d in listOf("system/bin", "system/xbin", "sbin", "vendor/bin", "system/vendor/bin")) {
@@ -782,6 +816,14 @@ class Importer(
         if (made > 0) log("sh/toolbox symlinks created: $made (missing from archive)")
     }
 
+    /** A relative target is resolved from the link's directory and must not climb above the image root. */
+    private fun linkStaysInside(linkRel: String, target: String): Boolean {
+        if (target.startsWith("/")) return false
+        val dir = linkRel.substringBeforeLast('/', "")
+        val resolved = File(root, if (dir.isEmpty()) target else "$dir/$target").toPath().normalize()
+        return resolved.startsWith(root.toPath().normalize())
+    }
+
     private fun relTarget(link: String, target: String): String {
         if (!target.startsWith("/")) return target
         val from = link.trimStart('/').split('/').dropLast(1)
@@ -793,6 +835,10 @@ class Importer(
     }
 
     companion object {
+        /** A real Android tree is far below this; the cap stops an archive with endless entries. */
+        private const val MAX_FILES = 1_000_000
+        private const val MAX_LINKS = 200_000
+        private const val MAX_ENTRIES = 500_000
         /** partition images other than system inside a tar (taken after system, which SYSTEM_IMAGE catches first) */
         private val PART_IMAGE = Regex("(?i)(vendor|product|odm|prism|optics)\\.img(\\.ext4)?(\\.lz4)?")
         /** system partition images by name (ext4/sparse, Samsung RFS, YAFFS2 dumps, super.img of 10+, erofs, f2fs) */

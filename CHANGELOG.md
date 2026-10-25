@@ -1,6 +1,27 @@
-# AEmulator 0.0.0.3
+# AEmulator 0.0.0.9
 
 **🇬🇧 English** · [🇷🇺 Русский](docs/i18n/CHANGELOG.ru.md) · [🇺🇦 Українська](docs/i18n/CHANGELOG.uk.md) · [🇩🇪 Deutsch](docs/i18n/CHANGELOG.de.md) · [🇫🇷 Français](docs/i18n/CHANGELOG.fr.md) · [🇪🇸 Español](docs/i18n/CHANGELOG.es.md) · [🇧🇷 Português](docs/i18n/CHANGELOG.pt-BR.md) · [🇮🇹 Italiano](docs/i18n/CHANGELOG.it.md) · [🇵🇱 Polski](docs/i18n/CHANGELOG.pl.md) · [🇹🇷 Türkçe](docs/i18n/CHANGELOG.tr.md) · [🇸🇦 العربية](docs/i18n/CHANGELOG.ar.md) · [🇮🇷 فارسی](docs/i18n/CHANGELOG.fa.md) · [🇮🇳 हिन्दी](docs/i18n/CHANGELOG.hi.md) · [🇮🇩 Indonesia](docs/i18n/CHANGELOG.id.md) · [🇻🇳 Tiếng Việt](docs/i18n/CHANGELOG.vi.md) · [🇨🇳 简体中文](docs/i18n/CHANGELOG.zh-CN.md) · [🇯🇵 日本語](docs/i18n/CHANGELOG.ja.md) · [🇰🇷 한국어](docs/i18n/CHANGELOG.ko.md)
+
+### Security
+- Import: boot/recovery/OTA reads are capped, the extracted tree is limited (24 GB, 1M files, 500k zip entries), and symlinks that resolve outside the image are dropped. Permissions from an `updater-script` can no longer walk out of the tree.
+- `TreeFixer` removes escaping symlinks before its first write, so a hostile firmware cannot redirect preparation into app storage.
+- ADB sync follows links only inside the image or the shared card, refuses to push through a symlink, and validates `logcat -b` buffer names.
+- The exported `MainActivity` accepts only `content://` VIEW intents; the raw `path`/`file`/`import` extras were removed, so another app cannot make AEmulator read an arbitrary file.
+- Image ids are validated (`[A-Za-z0-9_-]{1,64}`); clones do not copy escaping links and point `aemu-owners.jar` at their own ownership table.
+
+### Updates and CI
+- The updater reads this fork's releases, picks the APK for the installed flavour, requires and verifies `SHA256SUMS.txt`, caps download sizes, and refuses non-HTTPS URLs.
+- Unit tests run before the APK build; the build job is read-only, only the release job can write, tags must match `versionName`, and tagged releases are never cancelled.
+- ADB rejects bad packet magic, oversized packets and sync chunks, and caps concurrent connections at 32; logd rotates each buffer at 8 MB.
+
+# AEmulator 0.0.0.8
+
+### Reliability
+- Android 12/12L: the API 31 kernel now emulates `SO_PEERCRED` ids, so the 2024 zygote backport accepts `system_server` and the boot proceeds.
+- Automatic guest RAM is 3584 MB on an 8 GB phone (half of total RAM at most), including the manual choices.
+- The phantom vibrator VINTF declaration is removed before boot, so Android 15 no longer stalls on it.
+
+# AEmulator 0.0.0.3
 
 ### Emulation
 - New native arm64 engine: Android 5.0–17 and GSIs (8–17) run directly on the phone; Android 2.3–4.4 runs through QEMU.

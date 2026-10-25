@@ -30,6 +30,9 @@ class TreeFixer(
     // ---------------------------------------------------------------- однократно после импорта
 
     fun sanitize() {
+        // An imported tree may contain a link like system -> /data/data/...; every later write here
+        // would follow it. Drop such links before touching the tree.
+        sanitizeLinks()
         val parked = File(root, "system/.aemu-parked").apply { mkdirs() }
         var n = 0
         fun park(f: File) {
@@ -84,7 +87,35 @@ class TreeFixer(
         // 4. заслонки ядра: /dev/binder как каталог, группы планировщика
         File(root, "dev/binder").takeIf { it.isDirectory }?.let { wipe(it) }
         File(root, "dev/cpuctl").takeIf { it.exists() }?.let { wipe(it) }
+        // the next boot may skip the full scan; the tree was just checked and links are recreated as needed
+        runCatching { paths.bin.mkdirs(); File(paths.bin, "links.checked").writeText("1") }
         log("firmware prep: vendor modules set aside: $n")
+    }
+
+    /** Removes links whose host target leaves the image; the importer's own links stay relative. */
+    private fun sanitizeLinks() {
+        val base = runCatching { root.canonicalFile.toPath() }.getOrNull() ?: return
+        var dropped = 0
+        fun walk(d: File) {
+            for (f in d.listFiles() ?: return) {
+                if (isLink(f)) {
+                    val target = runCatching { Os.readlink(f.absolutePath) }.getOrNull() ?: continue
+                    // An absolute target is a host path (AEmulator's own links), a relative one is
+                    // resolved from the link's directory. Resolve lexically: following a chain here
+                    // would reject legitimate circular links such as vendor <-> system/vendor.
+                    val real = (if (target.startsWith("/")) File(target) else File(f.parentFile, target))
+                        .toPath().normalize()
+                    if (!real.startsWith(base)) {
+                        runCatching { Os.remove(f.absolutePath) }
+                        dropped++
+                    }
+                } else if (f.isDirectory) {
+                    walk(f)
+                }
+            }
+        }
+        walk(root)
+        if (dropped > 0) log("security: removed $dropped symlinks that escaped the image")
     }
 
     // ---------------------------------------------------------------- перед каждым запуском
@@ -110,6 +141,12 @@ class TreeFixer(
     }
 
     fun fixup(owners: Boolean = true) {
+        // images imported before the check existed get one scan; after that the stamp skips it
+        val linksChecked = File(paths.bin, "links.checked")
+        if (!linksChecked.isFile) {
+            sanitizeLinks()
+            runCatching { paths.bin.mkdirs(); linksChecked.writeText("1") }
+        }
         if (owners) seedOwners()
         installEngineFiles()
         sanitizeVibratorManifests()
@@ -1981,7 +2018,12 @@ class TreeFixer(
         // zygote reopens it by that path, which has to lead back to the same table
         if (img.api >= 24) runCatching {
             val link = File(root, "system/framework/aemu-owners.jar")
-            if (!isLink(link)) { link.delete(); Os.symlink(paths.owners.absolutePath, link.path) }
+            // a clone carries the source image's link; point it at this image's own table
+            val target = runCatching { Os.readlink(link.path) }.getOrNull()
+            if (target != paths.owners.absolutePath) {
+                runCatching { Os.remove(link.path) }
+                Os.symlink(paths.owners.absolutePath, link.path)
+            }
         }
         if (img.api < 21) return
         val parked = File(root, "system/.aemu-parked").apply { mkdirs() }

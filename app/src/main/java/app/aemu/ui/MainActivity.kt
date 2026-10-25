@@ -131,16 +131,10 @@ class MainActivity : ComponentActivity() {
     private fun handleView(i: Intent?) {
         if (i?.action == Intent.ACTION_VIEW) {
             val u = i.data
-            if (u != null) {
-                model.import(u)
-            } else {
-                val p = i.getStringExtra("path") ?: i.getStringExtra("file")
-                if (p != null) model.import(android.net.Uri.fromFile(java.io.File(p)))
-            }
-        }
-        val importPath = i?.getStringExtra("import")
-        if (importPath != null) {
-            model.import(android.net.Uri.fromFile(java.io.File(importPath)))
+            // This activity is exported: another app may send an intent here. Only content://
+            // is accepted; a file:// URI or a path extra would let any installed app make
+            // AEmulator read an arbitrary file with its broad storage permissions.
+            if (u != null && u.scheme == "content") model.import(u)
         }
         // ярлыки и автоматизация: am start -a app.aemu.BOOT --es id <образ>
         if (i?.action == ACTION_BOOT) i.getStringExtra("id")?.let { VmActivity.start(this, it, i.getBooleanExtra("recovery", false)) }

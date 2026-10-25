@@ -572,6 +572,12 @@ class LogdSink(paths: VmPaths, private val log: (String) -> Unit) {
     private val dir = File(paths.root, "dev/log")
     @Volatile private var s: android.net.LocalSocket? = null
 
+    private companion object {
+        /** Per-buffer cap: a long session must not fill the phone with logcat. */
+        const val LOG_LIMIT = 8L * 1024 * 1024
+        const val LOG_KEEP = 4L * 1024 * 1024
+    }
+
     fun start() {
         runCatching {
             sock.parentFile?.mkdirs(); sock.delete()
@@ -580,6 +586,7 @@ class LogdSink(paths: VmPaths, private val log: (String) -> Unit) {
             sock.setWritable(true, false)
             s = ls
             val outs = HashMap<Int, java.io.FileOutputStream>()
+            val counts = HashMap<Int, Int>()
             Thread({
                 val buf = ByteArray(5 * 1024 + 64)
                 val inp = ls.inputStream
@@ -589,7 +596,7 @@ class LogdSink(paths: VmPaths, private val log: (String) -> Unit) {
                     if (n <= 12) continue
                     val id = buf[0].toInt() and 0xff
                     val name = when (id) { 0 -> "main"; 1 -> "radio"; 3 -> "system"; 4 -> "crash"; else -> continue }
-                    val o = outs.getOrPut(id) { java.io.FileOutputStream(File(dir, name), true) }
+                    var o = outs.getOrPut(id) { java.io.FileOutputStream(File(dir, name), true) }
                     runCatching {
                         // 0x1e + epoch nanoseconds: GuestLog merges main/system/crash by time. Older
                         // files (crash.c, pre-5.0 guests) have no marker and are still parsed.
@@ -601,11 +608,35 @@ class LogdSink(paths: VmPaths, private val log: (String) -> Unit) {
                         var len = 9 + n - 11
                         if (buf[n - 1].toInt() != 0) rec[len++] = 0
                         o.write(rec, 0, len)
+                        val c = (counts[id] ?: 0) + 1
+                        counts[id] = c
+                        if (c % 256 == 0) o = rotate(File(dir, name), o).also { outs[id] = it }
                     }
                 }
                 outs.values.forEach { runCatching { it.close() } }
             }, "aemu-logd").apply { isDaemon = true; start() }
         }.onFailure { log("logd: socket failed: ${it.message}") }
+    }
+
+    /** Keeps the newest half of a buffer, starting at a record marker when one is found. */
+    private fun rotate(f: File, o: java.io.FileOutputStream): java.io.FileOutputStream {
+        if (o.channel.size() <= LOG_LIMIT) return o
+        o.close()
+        val tmp = File(f.parentFile, "${f.name}.tmp")
+        runCatching {
+            java.io.RandomAccessFile(f, "r").use { r ->
+                val start = (r.length() - LOG_KEEP).coerceAtLeast(0)
+                r.seek(start)
+                val data = ByteArray((r.length() - start).toInt())
+                r.readFully(data)
+                var off = 0
+                if (start > 0) { while (off < data.size && data[off] != 0x1e.toByte()) off++ }
+                if (off >= data.size) off = 0
+                tmp.outputStream().use { it.write(data, off, data.size - off) }
+            }
+            if (!tmp.renameTo(f)) { tmp.copyTo(f, overwrite = true); tmp.delete() }
+        }.onFailure { tmp.delete() }
+        return java.io.FileOutputStream(f, true)
     }
 
     private fun le32(b: ByteArray, o: Int): Long =

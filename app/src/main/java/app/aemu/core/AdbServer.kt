@@ -33,12 +33,16 @@ class AdbServer(private val vm: GuestVm) {
     fun start(): Boolean {
         if (server != null) return true
         for (p in 5555..5585 step 2) {
-            val s = runCatching { ServerSocket(p, 4, InetAddress.getByName("0.0.0.0")).apply { reuseAddress = true } }.getOrNull() ?: continue
+            val s = runCatching { ServerSocket(p, 16, InetAddress.getByName("0.0.0.0")).apply { reuseAddress = true } }.getOrNull() ?: continue
             server = s; port = p
             vm.log("adb: listening on ${addresses().joinToString { "$it:$p" }.ifEmpty { "port $p" }}")
             thread(name = "adb-accept", isDaemon = true) {
                 while (!s.isClosed) {
                     val c = runCatching { s.accept() }.getOrNull() ?: break
+                    if (conns.size >= MAX_CONNS) {
+                        runCatching { c.close() }
+                        continue
+                    }
                     conns.add(c)
                     thread(name = "adb-conn", isDaemon = true) {
                         runCatching { Conn(c).run() }.onFailure { if (!s.isClosed) vm.log("adb: ${it.message}") }
@@ -76,11 +80,14 @@ class AdbServer(private val vm: GuestVm) {
                 if (!readFully(input, h)) break
                 val b = ByteBuffer.wrap(h).order(ByteOrder.LITTLE_ENDIAN)
                 val cmd = b.int; val a0 = b.int; val a1 = b.int; val len = b.int
+                // a remote peer must not choose the allocation size or desync the stream
+                if (b.getInt(20) != cmd.inv()) break
+                if (len < 0 || len > MAX_PACKET) break
                 val data = ByteArray(len)
                 if (len > 0 && !readFully(input, data)) break
                 when (cmd) {
                     CNXN -> {
-                        maxData = a1.coerceIn(4096, 1024 * 1024)
+                        maxData = a1.coerceIn(4096, MAX_PACKET)
                         val p = vm.props
                         val banner = "device::ro.product.name=${p.get("ro.product.name") ?: "aemu"};" +
                             "ro.product.model=${p.get("ro.product.model") ?: vm.img.name};" +
@@ -307,6 +314,10 @@ class AdbServer(private val vm: GuestVm) {
             if (!readFully(i, h)) break
             val id = String(h, 0, 4, Charsets.ISO_8859_1)
             val len = le(h, 4)
+            if (len < 0 || len > MAX_PACKET) {
+                val m = "bad sync length $len".toByteArray()
+                o.write(id4("FAIL")); o.write(le4(m.size)); o.write(m); o.flush(); return
+            }
             val arg = ByteArray(len).also { if (!readFully(i, it)) return }
             when (id) {
                 "STAT" -> {
@@ -337,6 +348,7 @@ class AdbServer(private val vm: GuestVm) {
                         if (!readFully(i, h)) { fo?.close(); return }
                         val cid = String(h, 0, 4, Charsets.ISO_8859_1); val n = le(h, 4)
                         if (cid == "DATA") {
+                            if (n < 0 || n > MAX_PACKET) { err = "bad chunk length $n"; fo?.close(); break }
                             val chunk = ByteArray(n); if (!readFully(i, chunk)) { fo?.close(); return }
                             if (fo != null && err == null) runCatching { fo.write(chunk) }.onFailure { err = it.message }
                         } else if (cid == "DONE") {
@@ -385,6 +397,8 @@ class AdbServer(private val vm: GuestVm) {
         private const val WRTE = 0x45545257
         private const val CLSE = 0x45534c43
         private const val VERSION = 0x01000000
+        private const val MAX_PACKET = 1 shl 20
+        private const val MAX_CONNS = 32
         private val EMPTY = ByteArray(0)
 
         private fun readFully(i: InputStream, b: ByteArray): Boolean {

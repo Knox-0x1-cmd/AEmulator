@@ -279,7 +279,7 @@ fun UpdateDialog(
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = { onOpenUrl("https://github.com/uxazu/AEmulator") }) {
+                    TextButton(onClick = { onOpenUrl(AppUpdateManager.GITHUB_REPO_URL) }) {
                         Text(stringResource(R.string.update_open_github))
                     }
                 }

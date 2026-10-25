@@ -50,6 +50,7 @@ class Importer(
     private val perms = ArrayList<Triple<String, Int, Boolean>>() // (путь, режим, рекурсивно-файлы)
     private var files = 0
     private var bytes = 0L
+    private val maxTotalBytes = 24L * 1024 * 1024 * 1024
     private var gotSystem = false
     @Volatile var cancelled = false
 
@@ -160,7 +161,7 @@ class Importer(
                     val base = n.substringAfterLast('/')
                     when {
                         n.startsWith("system/") -> { a.getInputStream(fh).use { writeFile(n, it, null) }; gotSystem = true }
-                        base.equals("boot.img", true) -> a.getInputStream(fh).use { takeBoot(it.readBytes()) }
+                        base.equals("boot.img", true) && fh.fullUnpackSize in 1L..256_000_000L -> a.getInputStream(fh).use { takeBoot(it.readBytes()) }
                         base.equals("recovery.img", true) && fh.fullUnpackSize < 64_000_000 -> a.getInputStream(fh).use { recovery = it.readBytes() }
                         base.matches(SYSTEM_IMAGE) || base.matches(Regex("(?i).*\\.(zip|7z|tar|md5|tgz|gz|xz|pac|ftf|sin)")) && fh.fullUnpackSize > 20_000_000 ->
                             nested.add(a.getInputStream(fh).use { spill(it, base) } to base)
@@ -194,8 +195,27 @@ class Importer(
         }
     }.let { BufferedInputStream(it, 1 shl 20) }
 
-    private fun readAllFrom(src: RandomSource): ByteArray {
+    private fun readAllFrom(src: RandomSource, max: Long = 256L * 1024 * 1024): ByteArray {
+        if (src.size > max) throw IOException("file is too large")
         val b = ByteBuffer.allocate(src.size.toInt()); src.read(0, b); return b.array()
+    }
+
+    private fun readCapped(i: InputStream, max: Long, what: String): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val b = ByteArray(64 * 1024)
+        var total = 0L
+        while (true) {
+            val n = i.read(b)
+            if (n < 0) break
+            total += n
+            if (total > max) throw IOException("$what is too large")
+            out.write(b, 0, n)
+        }
+        return out.toByteArray()
+    }
+
+    private fun checkTotal() {
+        if (bytes > maxTotalBytes) throw IOException("the image is larger than ${maxTotalBytes shr 30} GB")
     }
 
     private var zipChannel: FileChannel? = null
@@ -214,9 +234,10 @@ class Importer(
         val total = entries.sumOf { maxOf(0L, it.size) }.coerceAtLeast(1)
         var done = 0L
         // сначала — сценарий установки (ссылки и права)
-        entries.firstOrNull { it.name.endsWith("META-INF/com/google/android/updater-script") }?.let { e ->
-            zip.getInputStream(e).use { parseUpdaterScript(String(it.readBytes())) }
-        }
+        entries.firstOrNull { it.name.endsWith("META-INF/com/google/android/updater-script") }
+            ?.takeIf { it.size in 1L..4_000_000L }?.let { e ->
+                zip.getInputStream(e).use { parseUpdaterScript(String(it.readBytes())) }
+            }
         // прошивка, упакованная вместе с папкой (Имя/META-INF/…, Имя/system/…): папку-обёртку снимаем
         val wrap = entries.firstOrNull { it.name.endsWith("META-INF/com/google/android/updater-script") }
             ?.name?.substringBefore("META-INF/")?.takeIf { it.isNotEmpty() && it.count { c -> c == '/' } == 1 } ?: ""
@@ -235,7 +256,7 @@ class Importer(
                     zip.getInputStream(e).use { writeFile(n, it, e.unixMode.takeIf { m -> m != 0 }) }
                     gotSystem = true
                 }
-                base.equals("boot.img", true) -> zip.getInputStream(e).use { takeBoot(it.readBytes()) }
+                base.equals("boot.img", true) && e.size in 1L..256_000_000L -> zip.getInputStream(e).use { takeBoot(it.readBytes()) }
                 base.equals("recovery.img", true) && e.size < 64_000_000 -> zip.getInputStream(e).use { recovery = it.readBytes() }
                 base.matches(SYSTEM_IMAGE) ->
                     withEntrySource(zip, e) { importImage(it, "system") }
@@ -263,7 +284,7 @@ class Importer(
         if (datBr != null && !gotSystem) {
             val listName = datBr.name.substringBeforeLast("system.new.dat") + "system.transfer.list"
             val listE = entries.firstOrNull { it.name == listName } ?: throw IOException("system.transfer.list missing")
-            val list = zip.getInputStream(listE).use { String(it.readBytes()) }
+            val list = zip.getInputStream(listE).use { String(readCapped(it, 16L * 1024 * 1024, "system.transfer.list")) }
             onProgress("Building system.img from OTA", 0.5f)
             val raw = File(tmp, "system.raw")
             zip.getInputStream(datBr).use { s ->
@@ -281,7 +302,7 @@ class Importer(
                     onProgress("Building $p.img from OTA", 0.8f)
                     zip.getInputStream(pDat).use { s ->
                         val data = if (pDat.name.endsWith(".br")) BrotliInputStream(BufferedInputStream(s, 1 shl 20)) else s
-                        TransferList.build(zip.getInputStream(pList).use { String(it.readBytes()) }, data, raw)
+                        TransferList.build(zip.getInputStream(pList).use { String(readCapped(it, 16L * 1024 * 1024, "$p.transfer.list")) }, data, raw)
                     }
                     FileChannel.open(raw.toPath(), StandardOpenOption.READ).use { c ->
                         importImage(ChannelSource(c), if (p == "vendor" || p == "odm") p else "system/$p")
@@ -312,7 +333,7 @@ class Importer(
                 when {
                     n.contains("__MACOSX/") || base.startsWith("._") -> {}
                     n.startsWith("system/") -> { writeFile(n, stream, null); gotSystem = true }
-                    base.equals("boot.img", true) -> takeBoot(stream.readBytes())
+                    base.equals("boot.img", true) && e.size in 1L..256_000_000L -> takeBoot(stream.readBytes())
                     base.equals("recovery.img", true) && e.size < 64_000_000 -> recovery = stream.readBytes()
                     base.matches(SYSTEM_IMAGE) -> nested.add(spill(stream, base) to "system")
                     base.matches(Regex("(?i)(system|kernel|boot)\\.sin")) -> importSin(stream, base)
@@ -373,7 +394,18 @@ class Importer(
 
     private fun spill(i: InputStream, name: String): File {
         val t = File(tmp, "${System.nanoTime()}-$name")
-        t.outputStream().use { o -> i.copyTo(o, 1 shl 20) }
+        val max = 16L * 1024 * 1024 * 1024
+        var total = 0L
+        t.outputStream().use { o ->
+            val b = ByteArray(1 shl 20)
+            while (true) {
+                val n = i.read(b)
+                if (n < 0) break
+                total += n
+                if (total > max) throw IOException("entry \"$name\" is larger than 16 GB")
+                o.write(b, 0, n)
+            }
+        }
         return t
     }
 
@@ -411,7 +443,7 @@ class Importer(
                     }.onFailure { log("$base skipped: ${it.message}") }
                 }
                 base.matches(Regex("(?i)(system|kernel|boot)\\.sin")) && e.isFile -> importSin(tar.nonClosing(), base)
-                base.matches(Regex("(?i)(boot\\.img|zImage|kernel)(\\.lz4)?")) && e.isFile -> takeBoot(maybeLz4(tar, base).readBytes())
+                base.matches(Regex("(?i)(boot\\.img|zImage|kernel)(\\.lz4)?")) && e.isFile && e.size in 1L..256_000_000L -> takeBoot(maybeLz4(tar, base).readBytes())
                 base.matches(Regex("(?i)recovery\\.img(\\.lz4)?")) && e.isFile && e.size < 64_000_000 -> recovery = maybeLz4(tar, base).readBytes()
                 base.matches(Regex("(?i).*\\.(tar|tar\\.md5)")) && e.isFile && e.size > 20_000_000 -> importTarStream(tar.nonClosing(), base, depth + 1)
                 // factory-образы Google: tgz → image-*.zip → system.img/boot.img; Samsung: zip внутри tar
@@ -498,7 +530,7 @@ class Importer(
                     f.parentFile?.mkdirs()
                     data().use { i -> f.outputStream().buffered(1 shl 20).use { o -> i.copyTo(o, 1 shl 16) } }
                     applyMode(f, mode and 0xfff)
-                    files++; bytes += size
+                    files++; bytes += size; checkTotal()
                 }
             }
             if (++n % 150 == 0) onProgress("$mount: ${path.substringAfterLast('/')}", -1f)
@@ -526,7 +558,10 @@ class Importer(
                 try { sin.inputStream().use { SinImage.unpack(it, raw) { if (cancelled) throw IOException("cancelled") } } } finally { sin.delete() }
             } else
             SinImage.unpack(s, raw) { if (cancelled) throw IOException("cancelled") }
-            if (base.startsWith("kernel", true) || base.startsWith("boot", true)) { takeBoot(raw.readBytes()); return }
+            if (base.startsWith("kernel", true) || base.startsWith("boot", true)) {
+                if (raw.length() > 256L * 1024 * 1024) throw IOException("$base is too large")
+                takeBoot(raw.readBytes()); return
+            }
             if (base.startsWith("recovery", true) || base.startsWith("fotakernel", true)) return
             FileChannel.open(raw.toPath(), StandardOpenOption.READ).use { c -> importImage(ChannelSource(c), base.substringBefore('.').lowercase()) }
         } finally { raw.delete() }
@@ -538,7 +573,7 @@ class Importer(
         log("PAC: ${list.joinToString { "${it.id}=${it.name}" }}")
         fun slice(e: PacFile.Entry) = ChannelSource(ch, e.offset, e.size)
         fun isPart(e: PacFile.Entry, p: String) = e.id.equals(p, true) || e.name.substringBefore('.').equals(p, true)
-        list.firstOrNull { isPart(it, "boot") }?.let { e ->
+        list.firstOrNull { isPart(it, "boot") }?.takeIf { it.size in 1L..256_000_000L }?.let { e ->
             val b = ByteBuffer.allocate(e.size.toInt()); slice(e).read(0, b); takeBoot(b.array())
         }
         list.firstOrNull { isPart(it, "recovery") }?.takeIf { it.size < 64_000_000 }?.let { e ->
@@ -585,7 +620,7 @@ class Importer(
                     f.parentFile?.mkdirs()
                     f.outputStream().buffered(1 shl 20).use { fs.copy(node, it) }
                     applyMode(f, node.perm)
-                    files++; bytes += node.size
+                    files++; bytes += node.size; checkTotal()
                 }
             }
             if (++n % 150 == 0) onProgress("$mount: ${path.substringAfterLast('/')}", -1f)
@@ -635,6 +670,7 @@ class Importer(
         f.parentFile?.mkdirs()
         if (runCatching { android.system.OsConstants.S_ISLNK(Os.lstat(f.path).st_mode) }.getOrDefault(false)) f.delete()
         f.outputStream().buffered(1 shl 20).use { o -> bytes += i.copyTo(o, 1 shl 16) }
+        checkTotal()
         if (mode != null) applyMode(f, mode and 0xfff)
         files++
     }

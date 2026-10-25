@@ -180,7 +180,7 @@ fun Library(model: LibraryModel) {
             val now = System.currentTimeMillis()
             if (now - app.aemu.AppPrefs.lastUpdateCheck(ctx) > 3600_000L) {
                 app.aemu.AppPrefs.setLastUpdateCheck(ctx, now)
-                val res = AppUpdateManager.checkLatestRelease()
+                val res = AppUpdateManager.checkLatestRelease(ctx)
                 res.getOrNull()?.let { rel ->
                     if (AppUpdateManager.isNewerVersion(rel.versionName, BuildConfig.VERSION_NAME)) {
                         updateState = UpdateState.Available(rel)

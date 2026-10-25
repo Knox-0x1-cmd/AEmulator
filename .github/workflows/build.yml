@@ -172,6 +172,10 @@ jobs:
           else
             TAG="build-$(date -u +%Y%m%d-%H%M)"
           fi
+          if [ -z "$TAG" ] || [ "${TAG#-}" != "$TAG" ] || ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._-]+$'; then
+            echo "::error::invalid release tag"
+            exit 1
+          fi
           if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$TAG" != "$VERSION" ] && [ "$TAG" != "v$VERSION" ]; then
             echo "::error::tag $TAG does not match versionName $VERSION"
             exit 1
